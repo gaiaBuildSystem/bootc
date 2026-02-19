@@ -609,6 +609,20 @@ fn cleanup_root(root: &Dir) -> Result<()> {
             }
         }
     }
+
+    // If /etc exists alongside /usr/etc, remove /etc to avoid ostree deploy errors.
+    // The tar import pipeline remaps /etc → /usr/etc, but if both somehow end up in
+    // the merged commit, ostree will reject it. Clean this up here.
+    let has_usretc = root.symlink_metadata_optional("usr/etc")?.is_some();
+    if has_usretc {
+        if let Some(etc_meta) = root.symlink_metadata_optional("etc")? {
+            if etc_meta.is_dir() {
+                tracing::info!("Removing /etc since /usr/etc exists");
+                root.remove_dir_all("etc")?;
+            }
+        }
+    }
+
     Ok(())
 }
 
