@@ -373,6 +373,11 @@ pub(crate) struct InstallConfigOpts {
     #[clap(long)]
     #[serde(default)]
     pub(crate) bootupd_skip_boot_uuid: bool,
+
+    /// Skip bootloader installation.
+    #[clap(long)]
+    #[serde(default)]
+    pub(crate) skip_bootloader: bool,
 }
 
 #[derive(Debug, Default, Clone, clap::Parser, Serialize, Deserialize, PartialEq, Eq)]
@@ -1592,12 +1597,13 @@ async fn prepare_install(
 
     // We need to access devices that are set up by the host udev
     bootc_mount::ensure_mirrored_host_mount("/dev")?;
-    // We need to read our own container image (and any logically bound images)
-    // from the host container store.
-    bootc_mount::ensure_mirrored_host_mount("/var/lib/containers")?;
+    // Use local container storage only. This is important for nested container
+    // environments where host storage does not contain the source image.
+    tracing::debug!("Using local container storage at /var/lib/containers");
     // In some cases we may create large files, and it's better not to have those
     // in our overlayfs.
-    bootc_mount::ensure_mirrored_host_mount("/var/tmp")?;
+    // bootc_mount::ensure_mirrored_host_mount("/var/tmp")?;
+    tracing::debug!("Using local container storage at /var/tmp");
     // udev state is required for running lsblk during install to-disk
     // see https://github.com/bootc-dev/bootc/pull/688
     bootc_mount::ensure_mirrored_host_mount("/run/udev")?;
@@ -1742,7 +1748,9 @@ async fn install_with_sysroot(
         .context("Opening deployment dir")?;
     let postfetch = PostFetchState::new(state, &deployment_dir)?;
 
-    if cfg!(target_arch = "s390x") {
+    if state.config_opts.skip_bootloader {
+        println!("Skipping bootloader installation (--skip-bootloader)");
+    } else if cfg!(target_arch = "s390x") {
         // TODO: Integrate s390x support into install_via_bootupd
         crate::bootloader::install_via_zipl(&rootfs.device_info, boot_uuid)?;
     } else {
@@ -1763,7 +1771,7 @@ async fn install_with_sysroot(
             }
         }
     }
-    tracing::debug!("Installed bootloader");
+    tracing::debug!("Processed bootloader installation step");
 
     tracing::debug!("Performing post-deployment operations");
 
@@ -1893,7 +1901,11 @@ async fn install_to_filesystem_impl(
         let (id, verity) = initialize_composefs_repository(state, rootfs).await?;
         tracing::info!("id: {id}, verity: {}", verity.to_hex());
 
-        setup_composefs_boot(rootfs, state, &id).await?;
+        if state.config_opts.skip_bootloader {
+            println!("Skipping bootloader installation (--skip-bootloader)");
+        } else {
+            setup_composefs_boot(rootfs, state, &id).await?;
+        }
     } else {
         ostree_install(state, rootfs, cleanup).await?;
     }
