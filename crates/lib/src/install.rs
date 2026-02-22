@@ -378,6 +378,11 @@ pub(crate) struct InstallConfigOpts {
     #[clap(long)]
     #[serde(default)]
     pub(crate) skip_bootloader: bool,
+
+    /// Configure ostree with U-Boot as the target bootloader.
+    #[clap(long = "u-boot")]
+    #[serde(default)]
+    pub(crate) u_boot: bool,
 }
 
 #[derive(Debug, Default, Clone, clap::Parser, Serialize, Deserialize, PartialEq, Eq)]
@@ -901,6 +906,22 @@ async fn initialize_ostree_root(state: &State, root_setup: &RootSetup) -> Result
             .args(["admin", "init-fs", "--modern", "."])
             .cwd(rootfs_dir)?
             .run()?;
+
+        // On a fresh u-boot install, ostree's write_config reads boot/loader/uEnv.txt
+        // before writing the new one.  boot/loader is a symlink to boot/loader.0 (or .1)
+        // that ostree normally maintains, but it doesn't exist yet on first install.
+        // Seed the initial state so ostree can open it successfully.
+        if state.config_opts.u_boot {
+            rootfs_dir
+                .create_dir("boot/loader.0")
+                .context("Creating boot/loader.0 for u-boot")?;
+            rootfs_dir
+                .symlink_contents("loader.0", "boot/loader")
+                .context("Creating boot/loader symlink for u-boot")?;
+            rootfs_dir
+                .write("boot/loader.0/uEnv.txt", b"")
+                .context("Creating boot/loader.0/uEnv.txt for u-boot")?;
+        }
     } else {
         println!("Reusing extant ostree layout");
 
@@ -1123,10 +1144,7 @@ async fn install_container(
         std::env::consts::ARCH,
     )?;
 
-    // If the target uses aboot, then we need to set that bootloader in the ostree
-    // config before deploying the commit
-    if ostree_ext::bootabletree::commit_has_aboot_img(&merged_ostree_root, None)? {
-        tracing::debug!("Setting bootloader to aboot");
+    let set_sysroot_bootloader = |bootloader: &str| -> Result<()> {
         Command::new("ostree")
             .args([
                 "config",
@@ -1134,12 +1152,25 @@ async fn install_container(
                 "ostree/repo",
                 "set",
                 "sysroot.bootloader",
-                "aboot",
+                bootloader,
             ])
             .cwd_dir(root_setup.physical_root.try_clone()?)
             .run_capture_stderr()
-            .context("Setting bootloader config to aboot")?;
+            .with_context(|| format!("Setting bootloader config to {bootloader}"))?;
         sysroot.repo().reload_config(None::<&gio::Cancellable>)?;
+        Ok(())
+    };
+
+    // If the target uses aboot, then we need to set that bootloader in the ostree
+    // config before deploying the commit.
+    if ostree_ext::bootabletree::commit_has_aboot_img(&merged_ostree_root, None)? {
+        tracing::debug!("Setting bootloader to aboot");
+        set_sysroot_bootloader("aboot")?;
+    }
+
+    if state.config_opts.u_boot {
+        tracing::debug!("Setting bootloader to uboot (--u-boot)");
+        set_sysroot_bootloader("uboot")?;
     }
 
     // Keep this in sync with install/completion.rs for the Anaconda fixups
